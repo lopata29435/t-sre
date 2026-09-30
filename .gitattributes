@@ -1,0 +1,7 @@
+* text=auto
+*.kt text eol=lf
+*.sql text eol=lf
+*.sh text eol=lf
+*.md text eol=lf
+*.yaml text eol=lf
+Dockerfile text eol=lf

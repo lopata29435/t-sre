@@ -1,0 +1,62 @@
+name: taskboard
+
+x-runtime: &runtime
+  image: taskboard:${APP_VERSION:-1.1.0}
+  build: .
+  environment:
+    DB_URL: ${DB_URL:-jdbc:postgresql://db:5432/taskboard}
+    DB_USER: ${DB_USER:-taskboard}
+    DB_PASSWORD: ${DB_PASSWORD:-taskboard_local_example}
+    DB_POOL_SIZE: ${DB_POOL_SIZE:-5}
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=65 -XX:InitialRAMPercentage=15 -XX:+ExitOnOutOfMemoryError
+  mem_limit: 512m
+  read_only: true
+  tmpfs:
+    - /tmp
+  stop_grace_period: 30s
+
+services:
+  db:
+    image: postgres:17.11-alpine
+    environment:
+      POSTGRES_DB: taskboard
+      POSTGRES_USER: ${DB_USER:-taskboard}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-taskboard_local_example}
+    ports:
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    mem_limit: 256m
+    restart: unless-stopped
+
+  migrate:
+    <<: *runtime
+    command: [--spring.profiles.active=migrate]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    <<: *runtime
+    ports:
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, wget, -q, --spider, http://127.0.0.1:8080/health/ready]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
