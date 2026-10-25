@@ -3,6 +3,7 @@ package ru.homework.taskboard.config
 import com.fasterxml.jackson.databind.cfg.CoercionAction
 import com.fasterxml.jackson.databind.cfg.CoercionInputShape
 import com.fasterxml.jackson.databind.type.LogicalType
+import io.micrometer.core.instrument.MeterRegistry
 import org.springframework.boot.autoconfigure.jackson.Jackson2ObjectMapperBuilderCustomizer
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
@@ -12,7 +13,7 @@ import ru.homework.taskboard.service.TaskService
 @Configuration(proxyBeanMethods = false)
 class ApplicationConfig {
     @Bean
-    fun taskService(repository: TaskRepository): TaskService = TaskService(repository)
+    fun taskService(repository: TaskRepository, registry: MeterRegistry): TaskService = TaskService(repository, registry)
 
     @Bean
     fun strictTextFields(): Jackson2ObjectMapperBuilderCustomizer = Jackson2ObjectMapperBuilderCustomizer { builder ->

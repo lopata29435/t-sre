@@ -1,13 +1,16 @@
 package ru.homework.taskboard
 
 import com.fasterxml.jackson.databind.JsonNode
+import io.micrometer.core.instrument.MeterRegistry
 import org.assertj.core.api.Assertions.assertThat
 import org.flywaydb.core.Flyway
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.web.client.TestRestTemplate
+import org.springframework.boot.test.web.server.LocalManagementPort
 import org.springframework.http.HttpEntity
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpMethod
@@ -22,9 +25,10 @@ import org.testcontainers.junit.jupiter.Testcontainers
 import java.util.concurrent.CompletableFuture
 
 @Testcontainers
+@AutoConfigureObservability
 @SpringBootTest(
     webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-    properties = ["spring.flyway.enabled=true"],
+    properties = ["spring.flyway.enabled=true", "management.server.port=0"],
 )
 class TaskApiIT {
     companion object {
@@ -51,6 +55,12 @@ class TaskApiIT {
     @Autowired
     lateinit var flyway: Flyway
 
+    @Autowired
+    lateinit var registry: MeterRegistry
+
+    @LocalManagementPort
+    var metricsPort: Int = 0
+
     @BeforeEach
     fun clearDatabase() {
         jdbc.sql("DELETE FROM tasks").update()
@@ -58,6 +68,7 @@ class TaskApiIT {
 
     @Test
     fun `complete CRUD over HTTP`() {
+        val before = businessCounters()
         val created = http.postForEntity(
             "/api/tasks",
             mapOf("title" to "  Проверить бэкапы  ", "description" to "PostgreSQL", "status" to "TODO"),
@@ -92,10 +103,12 @@ class TaskApiIT {
         assertThat(deleted.body).isNullOrEmpty()
         assertThat(http.getForEntity(path, JsonNode::class.java).statusCode).isEqualTo(HttpStatus.NOT_FOUND)
         assertThat(http.getForObject("/api/tasks", JsonNode::class.java)).isEmpty()
+        assertThat(businessCounters()).isEqualTo(before.mapValues { it.value + 1 })
     }
 
     @Test
     fun `invalid input never reaches database`() {
+        val before = businessCounters()
         val invalidBodies = listOf(
             """{"title":"   ","status":"TODO"}""",
             """{"status":"TODO"}""",
@@ -123,10 +136,12 @@ class TaskApiIT {
             assertThat(updated.statusCode).describedAs(body).isEqualTo(HttpStatus.BAD_REQUEST)
         }
         assertThat(taskCount()).isZero()
+        assertThat(businessCounters()).isEqualTo(before)
     }
 
     @Test
     fun `missing tasks and invalid IDs have predictable errors`() {
+        val before = businessCounters()
         assertThat(http.getForEntity("/api/tasks/0", String::class.java).statusCode).isEqualTo(HttpStatus.NOT_FOUND)
         assertThat(http.exchange("/api/tasks/0", HttpMethod.DELETE, HttpEntity.EMPTY, String::class.java).statusCode)
             .isEqualTo(HttpStatus.NOT_FOUND)
@@ -137,6 +152,25 @@ class TaskApiIT {
         assertThat(updated.statusCode).isEqualTo(HttpStatus.NOT_FOUND)
         assertThat(http.getForEntity("/api/tasks/not-a-number", String::class.java).statusCode)
             .isEqualTo(HttpStatus.BAD_REQUEST)
+        assertThat(businessCounters()).isEqualTo(before)
+    }
+
+    @Test
+    fun `exports OpenMetrics on a separate port`() {
+        http.getForEntity("/health/ready", String::class.java)
+        val headers = HttpHeaders().apply { set("Accept", "application/openmetrics-text;version=1.0.0") }
+        val response = http.exchange(
+            "http://localhost:$metricsPort/actuator/prometheus", HttpMethod.GET,
+            HttpEntity<Void>(headers), String::class.java,
+        )
+        assertThat(response.statusCode).isEqualTo(HttpStatus.OK)
+        assertThat(response.headers.contentType.toString()).startsWith("application/openmetrics-text")
+        assertThat(response.body).contains("jvm_memory_used_bytes", "http_server_requests_seconds", "# EOF")
+        for (operation in listOf("creations", "views", "updates", "deletions")) {
+            assertThat(response.body).contains("taskboard_tasks_${operation}_total")
+        }
+        assertThat(http.getForEntity("/actuator/prometheus", String::class.java).statusCode)
+            .isEqualTo(HttpStatus.NOT_FOUND)
     }
 
     @Test
@@ -205,6 +239,9 @@ class TaskApiIT {
             .isEqualTo("UP")
         assertThat(http.getForEntity("/health/ready", JsonNode::class.java).statusCode).isEqualTo(HttpStatus.OK)
     }
+
+    private fun businessCounters(): Map<String, Double> = listOf("creations", "views", "updates", "deletions")
+        .associateWith { registry.counter("taskboard.tasks.$it").count() }
 
     private fun taskCount(): Int = jdbc.sql("SELECT count(*) FROM tasks").query(Int::class.javaObjectType).single()
 }
